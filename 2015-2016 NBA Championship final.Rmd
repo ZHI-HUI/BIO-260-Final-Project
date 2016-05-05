@@ -1,0 +1,437 @@
+---
+title: "2015-2016 NBA Championship Prediction"
+output: html_document
+
+Authors: Yi-han Sheu, Zhihui Wang
+---
+
+NBA is one of the most popular professional sports worldwide. This year has been one of the most exciting seasons for NBA fans, in part because the long-term record of 72-regular season wins, held by Michael Jordan's Chicago Bulls, has been surpassed by the Golden State warriors, who has performed spectacularly well, led by its star player Stephen Curry - who is arguably the best shooter in the history of basketball. 
+
+That said, there are still many qualified contenders this year, including the San Antonio Spurs, who had 69 wins total and a 40-1 home record this year. As the playoffs proceeds, it would then be interesting to see which team would have the greatest odds of winning the championship this year. 
+
+In the following, we attempt to use a quantitative approach to predict who will be the NBA championship for the 2015-16 season. We gathered data from internet sources wrangled into a workable data set, and tackled the prediction question with supervised machine learning, primarily using linear regression with and without regularlization with 10-fold cross validation to model the score differences of each games. We use the score difference to decide the winning team for each game, and then predict the winner of each playoff series using the learnt model, assuming that the results of each game within the series are independent of one another.
+
+(Note: At the time of completion of this project, the 1st round of the playoff is completed. That said, we begun our playoff prediction starting from the 1st round (knowing which are the teams participating the playoffs from the actual results). However, we used the actual teams participating in the second round, instead of the predicted ones, for further prediciton, until the champion team is predicted)
+
+#Build data set 
+We gathered our data primarily from three sources: http://www.basketball-reference.com/, Yahoo-sports, and ESPN. The three sources offer data that are organized slightly differently. Basketball-reference has its web interface built such that its data can be directly output to csv format. Yahoo sports offer team-level data that is split into home and away circumstances, which is meaningful to game results. ESPN provides pre-engineered features in addition to the directly observed variables that are constructed by their experts. We combined the data from basketball-reference and Yahoo-sports together into a large dataframe. The ESPN data was dealt with seperately to construct its own dataframe because the engineered featured are expected to be highly colinear with the raw variables. The Basketball Referece-Yahoo data set included regular season games for the past 10 years and the ESPN for the past 9 years. Both dataframes were randomly split into a training set, which contains 90% of the data, and a test set, which includes 10% of the data. (Note: the code for the ESPN dataset is contained in later section) 
+
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(glmnet)
+setwd("/Users/zhihui/Documents/2016 Spring/BIO 260/Final Projects/Data")
+
+###Team level predictors for 2007-2016 seasons
+Team <- read.csv("Team.csv",stringsAsFactors = FALSE)
+Opponent <- read.csv("Opponent.csv",stringsAsFactors = FALSE)
+Team$Team <- gsub("\\*","", Team$Team)
+Opponent$Team <- gsub("\\*","", Opponent$Team)
+
+#Impute predictors for model 1
+Home1 <- left_join(Team, Opponent, by=c("Team","Season")) %>% select(Team, Season, PTS.G.x, PTS.G.y)
+colnames(Home1) <- c("HomeTeam","Season","HomeTeamPPG","HomeTeamPPGA")
+Visitor1 <- Home1
+colnames(Visitor1) <- c("VisitorTeam","Season","AwayTeamPPG","AwayTeamPPGA")
+
+#Impute predictors for model 2
+PPG <- read.csv("NBA_Team_Home_Away.csv",stringsAsFactors = FALSE) %>% select(-Rank)
+colnames(PPG) <- c("HomeTeam","HomeTeam_HomePPG","HomeTeam_AwayPPG","Season")
+PPGA <- read.csv("NBA_Opponent_Home_Away.csv",stringsAsFactors = FALSE) %>% select(-Rank)
+colnames(PPGA) <- c("HomeTeam","HomeTeam_HomePPGA","HomeTeam_AwayPPGA","Season")
+Home2 <- left_join(PPG,PPGA,by=c("HomeTeam","Season")) %>% select(-HomeTeam_AwayPPG, -HomeTeam_AwayPPGA)
+Visitor2 <- left_join(PPG,PPGA,by=c("HomeTeam","Season")) %>% select(-HomeTeam_HomePPG, -HomeTeam_HomePPGA)
+colnames(Visitor2) <- c("VisitorTeam","VisitorTeam_AwayPPG","Season","VisitorTeam_AwayPPGA")
+
+#Impute predictors for model 3
+Home3 <- read.csv("Home.csv",stringsAsFactors = FALSE)
+Visitor3 <- read.csv("Away.csv",stringsAsFactors = FALSE)
+
+#Combine predictors into one dataset for home team and one for visitor team
+Home1$HomeTeam <- gsub("Charlotte Bobcats","Charlotte Hornets",Home1$HomeTeam)
+Home1$HomeTeam <- gsub("New Orleans Hornets","New Orleans Pelicans",Home1$HomeTeam)
+Home1$HomeTeam <- gsub("New Jersey Nets","Brooklyn Nets",Home1$HomeTeam)
+Home1$HomeTeam <- gsub("Seattle SuperSonics","Oklahoma City Thunder",Home1$HomeTeam)
+Home1$HomeTeam <- gsub("New Orleans/Oklahoma City Hornets","New Orleans Pelicans",Home1$HomeTeam)
+Visitor1$VisitorTeam <- gsub("Charlotte Bobcats","Charlotte Hornets",Visitor1$VisitorTeam)
+Visitor1$VisitorTeam <- gsub("New Orleans Hornets","New Orleans Pelicans",Visitor1$VisitorTeam)
+Visitor1$VisitorTeam <- gsub("New Jersey Nets","Brooklyn Nets",Visitor1$VisitorTeam)
+Visitor1$VisitorTeam <- gsub("Seattle SuperSonics","Oklahoma City Thunder",Visitor1$VisitorTeam)
+Visitor1$VisitorTeam <- gsub("New Orleans/Oklahoma City Hornets","New Orleans Pelicans",Visitor1$VisitorTeam)
+Home <- left_join(Home1, Home2, by=c("HomeTeam","Season"))
+Visitor <- left_join(Visitor1, Visitor2, by=c("VisitorTeam","Season"))
+Home <- left_join(Home, Home3, by=c("HomeTeam","Season"))
+Visitor <- left_join(Visitor, Visitor3, by=c("VisitorTeam","Season"))
+
+#Game results for 2007-2016 seasons
+filename <- paste("leagues_NBA", seq(2007, 2016, 1), "games_games.csv", sep="_")
+Results <- read.csv("leagues_NBA_2007_games_games.csv",stringsAsFactors = FALSE)
+for (i in 2:10) {
+    Results <- rbind(Results, read.csv(filename[i]))
+}
+Results <- Results %>% filter(X=="Box Score")  %>% select(Date, Visitor.Neutral, PTS, Home.Neutral, PTS.1)
+colnames(Results) <- c("Date","VisitorTeam","VisitorScores","HomeTeam","HomeScores")
+Results <- Results %>% mutate(ScoreDiff=as.numeric(HomeScores)-as.numeric(VisitorScores), Wins=as.integer(ScoreDiff>0))  
+Results <- Results %>% separate(data=.,col=Date,into=c("Week","Month","Day","Year"),sep=" ") 
+func.season <- function(Month, Year){
+    if(Month %in% c("Oct", "Nov", "Dec")) {
+        Season <- Year+1
+        return(Season)}
+    else {return(Year)}
+}
+Season <- mapply(func.season, Results$Month, as.numeric(Results$Year))
+Results <- Results %>% cbind(Season)
+Results <- Results[, 5:11]
+
+Results$HomeTeam <- gsub("Charlotte Bobcats","Charlotte Hornets",Results$HomeTeam)
+Results$HomeTeam <- gsub("New Orleans Hornets","New Orleans Pelicans",Results$HomeTeam)
+Results$HomeTeam <- gsub("New Jersey Nets","Brooklyn Nets",Results$HomeTeam)
+Results$HomeTeam <- gsub("Seattle Supersonics","Oklahoma City Thunder",Results$HomeTeam)
+Results$HomeTeam <- gsub("Seattle SuperSonics","Oklahoma City Thunder",Results$HomeTeam)
+Results$HomeTeam <- gsub("New Orleans/Oklahoma City Hornets","New Orleans Pelicans",Results$HomeTeam)
+Results$VisitorTeam <- gsub("Charlotte Bobcats","Charlotte Hornets",Results$VisitorTeam)
+Results$VisitorTeam <- gsub("New Orleans Hornets","New Orleans Pelicans",Results$VisitorTeam)
+Results$VisitorTeam <- gsub("New Jersey Nets","Brooklyn Nets",Results$VisitorTeam)
+Results$VisitorTeam <- gsub("Seattle Supersonics","Oklahoma City Thunder",Results$VisitorTeam)
+Results$VisitorTeam <- gsub("Seattle SuperSonics","Oklahoma City Thunder",Results$VisitorTeam)
+Results$VisitorTeam <- gsub("New Orleans/Oklahoma City Hornets","New Orleans Pelicans",Results$VisitorTeam)
+
+n_test <- round(nrow(Results) / 10)
+set.seed(36)
+test_indices <- sample(1:nrow(Results), n_test, replace=FALSE)
+test <- Results[test_indices,]
+train <- Results[-test_indices,]
+
+train <- left_join(train, Home, by=c("HomeTeam","Season"))
+train <- left_join(train, Visitor, by=c("VisitorTeam","Season"))
+test <- left_join(test, Home, by=c("HomeTeam","Season"))
+test <- left_join(test, Visitor, by=c("VisitorTeam","Season"))
+```
+
+#Simple linear model with intercept only
+After constructing the data set, our analysis begin with linear regression with intercept only. All of the following models predict the score difference of home team - away team. The decision rule is such that if score difference is greater than zero, then the home team wins. The inverse is true for a visitor team win.
+
+The intercept only model involves using the mean score difference of all games and use that to predict the winner of each game. Since the mean score difference of every game is greater than zero, we predict that for all games, the home team has won.
+
+```{r}
+#training set
+train0fit <- lm(ScoreDiff ~ 1, data = train)
+summary(train0fit)
+train <- train %>% mutate(Wins_hat0 = 1)
+table(train$Wins, train$Wins_hat0)
+train <- train %>% mutate(Correct0=as.numeric(Wins==Wins_hat0))
+mean(train$Correct0)
+#test set
+test <- test %>% mutate(Wins_hat0 = 1)
+table(test$Wins, test$Wins_hat0)
+test <- test %>% mutate(Correct0=as.numeric(Wins==Wins_hat0))
+mean(test$Correct0)
+```
+If we always bet on the home team, the accuracy in training set is 59.3% and the accuracy in test set is 60.6%.
+
+#Linear model using home team points scored per game, home team points allowed per game, visitor Team points scored per game and visitor team points allowed per game
+
+We then build a model adding in the most obvious predictors of the game, namely home team points scored per game, home team points allowed per game, visitor Team points scored per game and visitor team points allowed per game. Note that in this model, the points scored/allowed used are such data for the team over the whole season, and does not take into account the difference of the team playing home or away. 
+
+```{r}
+train1fit <- lm(ScoreDiff ~ HomeTeamPPG + HomeTeamPPGA + AwayTeamPPG + AwayTeamPPGA, data = train)
+summary(train1fit)
+FittedValues1 <- train1fit$fitted.values
+train <- cbind(train,FittedValues1)
+train <- train %>% mutate(Wins_hat1=0)
+train$Wins_hat1 <- ifelse(train$FittedValues1>0,1,0)
+table(train$Wins,train$Wins_hat1)
+train <- train %>% mutate(Correct1=as.numeric(Wins==Wins_hat1))
+mean(train$Correct1)
+
+FittedValues1 <- predict(train1fit, newdata=test)
+test <- cbind(test,FittedValues1)
+test <- test %>% mutate(Wins_hat1=0)
+test$Wins_hat1 <- ifelse(test$FittedValues1>0,1,0)
+table(test$Wins,test$Wins_hat1)
+test <- test %>% mutate(Correct1=as.numeric(Wins==Wins_hat1))
+mean(test$Correct1)
+```
+Using this model, we get prediction accuracy in training set of 69.9% and accuracy in test set of 67.7%. Model accuracy has significantly improved compared to the intercept only model.
+
+#Linear model using home team PPG at home, home team PPGA at home, visitor team PPG away, visitor team PPGA away
+
+Now, we use points scored/allowed with consideration of the actual home/away status to build the model.
+
+```{r}
+train2fit <- lm(ScoreDiff ~ HomeTeam_HomePPG + HomeTeam_HomePPGA + VisitorTeam_AwayPPG + VisitorTeam_AwayPPGA, data = train)
+summary(train2fit)
+FittedValues2 <- train2fit$fitted.values
+train <- cbind(train,FittedValues2)
+train <- train %>% mutate(Wins_hat2=0)
+train$Wins_hat2 <- ifelse(train$FittedValues2>0,1,0)
+table(train$Wins,train$Wins_hat2)
+train <- train %>% mutate(Correct2=as.numeric(Wins==Wins_hat2))
+mean(train$Correct2)
+
+FittedValues2 <- predict(train2fit, newdata=test)
+test <- cbind(test,FittedValues2)
+test <- test %>% mutate(Wins_hat2=0)
+test$Wins_hat2 <- ifelse(test$FittedValues2>0,1,0)
+table(test$Wins,test$Wins_hat2)
+test <- test %>% mutate(Correct2=as.numeric(Wins==Wins_hat2))
+mean(test$Correct2)
+```
+Using this model, we get prediction accuracy of 70.2% in the training set, and 70.1% in the test set. Model accuracy slightly increased.
+
+#Linear model using home team PPG at home, home team PPGA at home, visitor team PPG away, visitor team PPGA away, and additional predictors (pre-selected by prior knowledge)
+
+Now, we add in the model the detailed team-specific variables such as field goal attempted, field goal percentage, three pointers attemped, three pointers percentage, steals, assists, blocks, and rebounds. Home/away status is considered.
+
+```{r}
+train3fit <-  lm(ScoreDiff ~ Away_FGPct + Away_3PA + Away_3PPct + Away_FTA + Away_FT_Pct+ Away_ORB+ Away_DRB+ Away_AST+ Away_TO + Away_STL + Away_BLK + Home_FGPct + Home_3PA + Home_3PPct + Home_FTA+ Home_FT_Pct+ Home_ORB+ Home_DRB+ Home_AST+ Home_TO+ Home_STL+ Home_BLK + HomeTeam_HomePPG + HomeTeam_HomePPGA + VisitorTeam_AwayPPG +VisitorTeam_AwayPPGA, data=train)
+summary(train3fit)
+FittedValues3 <- train3fit$fitted.values
+train <- cbind(train, FittedValues3)
+train <- train %>% mutate(Wins_hat3=0)
+train$Wins_hat3 <- ifelse(train$FittedValues3>0,1,0)
+table(train$Wins,train$Wins_hat3)
+train <- train %>% mutate(Correct3=as.numeric(Wins==Wins_hat3))
+mean(train$Correct3)
+
+FittedValues3 <- predict(train3fit, newdata=test)
+test <- cbind(test,FittedValues3)
+test <- test %>% mutate(Wins_hat3=0)
+test$Wins_hat3 <- ifelse(test$FittedValues3>0,1,0)
+table(test$Wins,test$Wins_hat3)
+test <- test %>% mutate(Correct3=as.numeric(Wins==Wins_hat3))
+mean(test$Correct3)
+```
+Using this model, we get accuracy of 70.4% for the training set, and 70.1% for the test set. None of the p-values for the new variables are significant, and the model accuracy did not improve both for the training and the test sets. The fact that the training model fit did not improve implies that the additional variables does not contain new information in addition to the original variables (i.e. points scored/allowed). Since we are then not overfitting (and not fitting better in general) the training set, it is also unlikely the performance in the test set would decrease or improve. The observation that the performance between the training and test sets are very similar in all of the models above may be explained by that we are in fact not overfitting, and by randomizing to set up the training and test sets, the characteristics of the two sets are in fact very similar, given that sample size for both sets are large enough to remove effect of random variation.
+
+#Linear model using variable selection method (Elastic net regularization)
+Despite having no evidence of overfitting, we decided to apply regularized regression to perform variable selection. We applied the "glmnet" package, which contains easy-to-use and efficient algorithm for regularlized regression with ridge/Lasso/Elastic Net. Switching between the three kinds of regularization only involves tuning or a parameter alpha which determines the weighting of L1 and and L2 norms. We tested Elastic Net (at alpha = 0.5) and pure lasso (alpha = 1) with 10-fold cross validation and yielded similar results in terms of model accuracy. In the following, the Elastic Net model is shown and its results reported. 
+
+
+```{r}
+train2 <- as.matrix(data.frame(train[, 8:51]))
+train_outcome <- train[,5]
+test2 <- as.matrix(data.frame(test[, 8:51]))
+test_outcome <- test[,5]
+cv.train4fit <- cv.glmnet(x=train2, y=train_outcome, alpha=0.5)
+FittedValues4 <- predict(cv.train4fit, train2)
+
+train <- cbind(train, FittedValues4)
+names(train)[63]<-"FittedValues4"
+train <- train %>% mutate(Wins_hat4=0)
+train$Wins_hat4 <- ifelse(train$FittedValues4>0,1,0)
+table(train$Wins, train$Wins_hat4)
+train <- train %>% mutate(Correct4=as.numeric(Wins==Wins_hat4))
+mean(train$Correct4)
+
+FittedValues4 <- predict(cv.train4fit, test2)
+test <- cbind(test, FittedValues4)
+names(test)[63]<-"FittedValues4"
+test <- test %>% mutate(Wins_hat4=0)
+test$Wins_hat4 <- ifelse(test$FittedValues4>0,1,0)
+table(test$Wins, test$Wins_hat4)
+test <- test %>% mutate(Correct4=as.numeric(Wins==Wins_hat4))
+mean(test$Correct4)
+```
+The accuracy is 70.4% for the training set, and 68.7% for the test set. As expected, model performance did not improve in both of the sets since the additional variables did not capture new signal, nor noise, therefore the regularization probably added in some bias that led to slightly decreased performance in the test set.
+
+
+#Linear model with efficiency variables for 2008-2016 seasons (using ESPN data)
+Now, we perform a regression model using the ESPN data, of which features are pre-engineered by ESPN experts, in the way they think would be reasonable. We included all existing variables from this dataset. 
+
+
+```{r}
+setwd("/Users/zhihui/Documents/2016 Spring/BIO 260/Final Projects/Data")
+Efficiency <- read.csv("ESPN.csv", stringsAsFactors = FALSE)
+Home4 <- Efficiency
+colnames(Home4) <- c("HomeTeam","HomePACE","HomeAST","HomeTO","HomeORR","HomeDRR","HomeREBR","HomeEFF.FG.","HomeTS.","HomeOFF.EFF.","HomeDFF.EFF","Season")
+Visitor4 <- Efficiency
+colnames(Visitor4) <- c("VisitorTeam","VisitorPACE","VisitorAST","VisitorTO","VisitorORR","VisitorDRR","VisitorREBR","VisitorEFF.FG.","VisitorTS.","VisitorOFF.EFF.","VisitorDFF.EFF","Season")
+train3 <- train %>% filter(Season!=2007)
+train3 <- left_join(train3, Home4, by=c("HomeTeam","Season"))
+train3 <- left_join(train3, Visitor4, by=c("VisitorTeam","Season"))
+test3 <- test %>% filter(Season!=2007)
+test3 <- left_join(test3, Home4, by=c("HomeTeam","Season"))
+test3 <- left_join(test3, Visitor4, by=c("VisitorTeam","Season"))
+train5fit <- lm(ScoreDiff ~ HomePACE+HomeAST+HomeTO+HomeORR+HomeDRR+HomeREBR+HomeEFF.FG.+HomeTS.+HomeOFF.EFF.+HomeDFF.EFF+VisitorPACE+VisitorAST+VisitorTO+VisitorORR+VisitorDRR+VisitorREBR+VisitorEFF.FG.+VisitorTS.+VisitorOFF.EFF.+VisitorDFF.EFF, data=train3)
+summary(train5fit)
+FittedValues5 <- train5fit$fitted.values
+train3 <- cbind(train3,FittedValues5)
+train3 <- train3 %>% mutate(Wins_hat5=0)
+train3$Wins_hat5 <- ifelse(train3$FittedValues5>0,1,0)
+table(train3$Wins,train3$Wins_hat5)
+train3 <- train3 %>% mutate(Correct5=as.numeric(Wins==Wins_hat5))
+mean(train3$Wins_hat5)
+
+FittedValues5 <- predict(train5fit,newdata = test3)
+test3 <- cbind(test3,FittedValues5)
+test3 <- test3 %>% mutate(Wins_hat5=0)
+test3$Wins_hat5 <- ifelse(test3$FittedValues5>0,1,0)
+table(test3$Wins,test3$Wins_hat5)
+test3 <- test3 %>% mutate(Correct5=as.numeric(Wins==Wins_hat5))
+mean(test3$Wins_hat5)
+```
+Using this model, we get prediction accuracy of 66.3% for the training set, and 66.4% for the test set. It can be observed that the model did perform better than that using the un-engineered features, and therefore there is no evidenct that this set of features would be more legitimate than the originals to describe the game.  
+
+##Based on previous sections, we choose model 2 with four parameters (home team PPG at home, home team PPGA at home, visitor team PPG away, visitor team PPGA away) to predict 2015-2016 playoff season.
+
+Based on the above results, the final model we will be using to predict championship will be the simple model with points scored/allowed, in consideration of home/away status (model 2). The training and test sets were combined to the full data set and model parameters were learnt regressing on this final data set.
+
+
+```{r}
+FinalModel <- rbind(train, test)
+FinalModelFit <- lm(ScoreDiff ~ HomeTeam_HomePPG + HomeTeam_HomePPGA + VisitorTeam_AwayPPG + VisitorTeam_AwayPPGA, data=FinalModel)
+summary(FinalModelFit)
+FittedValues <- FinalModelFit$fitted.values
+FinalModel <- cbind(FinalModel, FittedValues)
+FinalModel <- FinalModel %>% mutate(Wins_hat=0)
+FinalModel$Wins_hat <- ifelse(FinalModel$FittedValues>0,1,0)  
+table(FinalModel$Wins, FinalModel$Wins_hat)
+FinalModel <- FinalModel %>% mutate(Correct=as.numeric(Wins==Wins_hat))
+mean(FinalModel$Correct)
+```
+
+#Predicting the championship
+Now, we predict the results for the playoff matches using the actual 16 teams that made into the post-season. The playoffs are played for the best of 7. The prediction is modeled such that the team pairs would play 7 games, which would be sampled independently assuming no correlation conditioned on the predictors, considering home court advantage for the higher ranking teams. The expected wins for the higher ranking teams were calculated. If the expected wins are greater than 3.5, than the higher ranking team proceeds to the next round. If not, the other team proceeds. We begin with the first round matches.
+
+#First Round
+#Western Conference
+#Warriors vs. Rocket  (4 home 3 away for the first team)
+```{r}
+FinalModel <- FinalModel %>% mutate(Error=ScoreDiff - FittedValues)
+hist(FinalModel$Error)  
+SD <- sd(FinalModel$Error)
+FinalModel <- FinalModel %>% mutate(SD=SD) %>% mutate(ZScore=FittedValues/SD) %>% mutate(p_hat = pnorm(ZScore))
+p_hat1 <- FinalModel %>% filter(HomeTeam=="Golden State Warriors" & VisitorTeam=="Houston Rockets" & Season==2016)
+p_hat2 <- FinalModel %>% filter(VisitorTeam=="Golden State Warriors" & HomeTeam=="Houston Rockets" & Season==2016)
+4*p_hat1$p_hat[1] + 3*(1 - p_hat2$p_hat[1])
+```
+Warriors shall win.
+
+#Clippers vs. Trailblazers
+```{r}
+p_hat1 <- FinalModel %>% filter(HomeTeam=="Los Angeles Clippers" & VisitorTeam=="Portland Trail Blazers" & Season==2016)
+p_hat2 <- FinalModel %>% filter(VisitorTeam=="Los Angeles Clippers" & HomeTeam=="Portland Trail Blazers" & Season==2016)
+4*p_hat1$p_hat[1] + 3*(1 - p_hat2$p_hat[1])
+```
+Clippers shall win*.
+
+#Spurs vs. Grizzlies
+```{r}
+p_hat1 <- FinalModel %>% filter(HomeTeam=="San Antonio Spurs" & VisitorTeam=="Memphis Grizzlies" & Season==2016)
+p_hat2 <- FinalModel %>% filter(VisitorTeam=="San Antonio Spurs" & HomeTeam=="Memphis Grizzlies" & Season==2016)
+4*p_hat1$p_hat[1] + 3*(1 - p_hat2$p_hat[1])
+```
+Spurs shall win.
+
+#Thunder vs. Timberwolves
+```{r}
+p_hat1 <- FinalModel %>% filter(HomeTeam=="Oklahoma City Thunder" & VisitorTeam=="Minnesota Timberwolves" & Season==2016)
+p_hat2 <- FinalModel %>% filter(VisitorTeam=="Oklahoma City Thunder" & HomeTeam=="Minnesota Timberwolves" & Season==2016)
+4*p_hat1$p_hat[1] + 3*(1 - p_hat2$p_hat[1])
+```
+Thunder shall win.
+
+#Eastern Conference
+#Cavaliers vs. Pistons
+```{r}
+p_hat1 <- FinalModel %>% filter(HomeTeam=="Cleveland Cavaliers" & VisitorTeam=="Detroit Pistons" & Season==2016)
+p_hat2 <- FinalModel %>% filter(VisitorTeam=="Cleveland Cavaliers" & HomeTeam=="Detroit Pistons" & Season==2016)
+4*p_hat1$p_hat[1] + 3*(1 - p_hat2$p_hat[1])
+```
+Cavaliers shall win.
+
+#Hawks vs. Celtics
+```{r}
+p_hat1 <- FinalModel %>% filter(HomeTeam=="Atlanta Hawks" & VisitorTeam=="Boston Celtics" & Season==2016)
+p_hat2 <- FinalModel %>% filter(VisitorTeam=="Atlanta Hawks" & HomeTeam=="Boston Celtics" & Season==2016)
+4*p_hat1$p_hat[1] + 3*(1 - p_hat2$p_hat[1])
+```
+Hawks shall win.
+
+#Raptors vs. Pacers
+```{r}
+p_hat1 <- FinalModel %>% filter(HomeTeam=="Toronto Raptors" & VisitorTeam=="Indiana Pacers" & Season==2016)
+p_hat2 <- FinalModel %>% filter(VisitorTeam=="Toronto Raptors" & HomeTeam=="Indiana Pacers" & Season==2016)
+4*p_hat1$p_hat[1] + 3*(1 - p_hat2$p_hat[1])
+```
+Raptors shall win.
+
+#Heat vs. Hornets
+```{r}
+p_hat1 <- FinalModel %>% filter(HomeTeam=="Miami Heat" & VisitorTeam=="Charlotte Hornets" & Season==2016)
+p_hat2 <- FinalModel %>% filter(VisitorTeam=="Miami Heat" & HomeTeam=="Charlotte Hornets" & Season==2016)
+4*p_hat1$p_hat[1] + 3*(1 - p_hat2$p_hat[1])
+```
+Hornet shall win*.
+
+We predict 6/8 match pairs correctly. The results were mostly accurate - although in our team-based model we could not take into account the effect of injuries, as seen in the Clippers and Trailblazers match, in which the two best players of the Clippers suffered from major injuries and led to there loss (and also inaccuracy of our model). The other pair we failed to predict correctly is the Heat vs. Hornets matchup. This matchup has team characteristics that are very similar and therefore is harder to predict accurately. In fact, they played to game 7 until the Heat made it to the second round.
+
+In the following, we proceed to make predictions of the winners of each series, until the 2015-16 championship team is estimated.
+
+
+#Second Round (based on actual matches)
+#Western Conference
+#Warriors vs. Trailblazers
+```{r}
+p_hat1 <- FinalModel %>% filter(HomeTeam=="Golden State Warriors" & VisitorTeam=="Portland Trail Blazers" & Season==2016)
+p_hat2 <- FinalModel %>% filter(VisitorTeam=="Golden State Warriors" & HomeTeam=="Portland Trail Blazers" & Season==2016)
+4*p_hat1$p_hat[1] + 3*(1 - p_hat2$p_hat[1])
+```
+Warriors shall win.
+
+#Spurs vs. Thunder
+```{r}
+p_hat1 <- FinalModel %>% filter(HomeTeam=="San Antonio Spurs" & VisitorTeam=="Oklahoma City Thunder" & Season==2016)
+p_hat2 <- FinalModel %>% filter(VisitorTeam=="San Antonio Spurs" & HomeTeam=="Oklahoma City Thunder" & Season==2016)
+4*p_hat1$p_hat[1] + 3*(1 - p_hat2$p_hat[1])
+```
+Spurs shall win.
+
+#Eastern Conference
+#Cavaliers vs. Hawks
+```{r}
+p_hat1 <- FinalModel %>% filter(HomeTeam=="Cleveland Cavaliers" & VisitorTeam=="Atlanta Hawks" & Season==2016)
+p_hat2 <- FinalModel %>% filter(VisitorTeam=="Cleveland Cavaliers" & HomeTeam=="Atlanta Hawks" & Season==2016)
+4*p_hat1$p_hat[1] + 3*(1 - p_hat2$p_hat[1])
+```
+Cavaliers shall win.
+
+#Raptors vs. Heat
+```{r}
+p_hat1 <- FinalModel %>% filter(HomeTeam=="Toronto Raptors" & VisitorTeam=="Miami Heat" & Season==2016)
+p_hat2 <- FinalModel %>% filter(VisitorTeam=="Toronto Raptors" & HomeTeam=="Miami Heat" & Season==2016)
+4*p_hat1$p_hat[1] + 3*(1 - p_hat2$p_hat[1])
+```
+Raptors shall win.
+
+#Conference finals
+#Warriors vs. Spurs
+```{r}
+p_hat1 <- FinalModel %>% filter(HomeTeam=="Golden State Warriors" & VisitorTeam=="San Antonio Spurs" & Season==2016)
+p_hat2 <- FinalModel %>% filter(VisitorTeam=="Golden State Warriors" & HomeTeam=="San Antonio Spurs" & Season==2016)
+4*p_hat1$p_hat[1] + 3*(1 - p_hat2$p_hat[1])
+```
+Warriors shall win.
+
+#Cavaliers vs. Raptors
+```{r}
+p_hat1 <- FinalModel %>% filter(HomeTeam=="Cleveland Cavaliers" & VisitorTeam=="Toronto Raptors" & Season==2016)
+p_hat2 <- FinalModel %>% filter(VisitorTeam=="Cleveland Cavaliers" & HomeTeam=="Toronto Raptors" & Season==2016)
+4*p_hat1$p_hat[1] + 3*(1 - p_hat2$p_hat[1])
+```
+Cavaliers shall win.
+
+#Finals
+#Warriors vs. Cavaliers
+```{r}
+p_hat1 <- FinalModel %>% filter(HomeTeam=="Golden State Warriors" & VisitorTeam=="Cleveland Cavaliers" & Season==2016)
+p_hat2 <- FinalModel %>% filter(VisitorTeam=="Golden State Warriors" & HomeTeam=="Cleveland Cavaliers" & Season==2016)
+4*p_hat1$p_hat[1] + 3*(1 - p_hat2$p_hat[1])
+```
+The Warriors shall beat the Cavaliers and become the 2015-2016 NBA Championship!
+
+Discussion:
+
+Our model resulted in grossly 70% accuracy in the training and validation sets. Assuming that NBA basketball games have similar underlying patterns across all games, our results implies that we are able to capture some, but not all, dimensions of information of the games, or that our decision boundary hyperplane as contructed using the linear model cannot provide a good separation (i.e. discrimination) of the data points. Increasing the number of featured using common basketball statistics (i.e. rebounds, assists, etc) in addition to points scored/allowed does not improve overall accuracy, as well as using pre-engineered features from ESPN. Several other limitations may also explain the "ceiling" of our prediction: (1) As basketball as a sport with dynamic strategy and team chemistry, the interaction between teams are not modeled in our approach. It is commonly seen that some teams perform better against a certain team than against another. Modelling team interactions would involve creation of a large number of indicator variables which would be quite sparse. Given the size of data on hand we eventually decided not to do so; (2) At the prediction phase, we used season average performance data to predict specific games (i.e. using season average points scored/allow to predict results of game 1, game 10,..., etc), which may not perfectly reflect the true condition of the teams at a certain time point, as some teams clearly perform better or worse depending on the time of the season; (3) While team level statistics captures the interaction effect of between team members (since team level output is the aggragation of individual effects and the "chemistry"), we were not able to model individual level changes, such as player injury and transactions; (4) lastly, as with any physical games, there is day-to-day difference in terms of physical wellness and performance, and these are hard to capture and would result in noise in the observations. Potentially, modelling games using player level data may alleviate some of these problems, but that would require a larger degree of freedom, in particular if we attempt to model the interactions. In that scenario, the limitation would perhaps be whether we have sufficient data size, as we always have to deal with the bias-variance tradeoff. 
