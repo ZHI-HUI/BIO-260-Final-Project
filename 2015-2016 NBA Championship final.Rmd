@@ -3,6 +3,9 @@ title: "2015-2016 NBA Championship Prediction"
 output: html_document
 
 Authors: Yi-han Sheu, Zhihui Wang
+
+All data are included in the git repository: https://github.com/ZHI-HUI/BIO-260-Final-Project
+
 ---
 
 NBA is one of the most popular professional sports worldwide. This year has been one of the most exciting seasons for NBA fans, in part because the long-term record of 72-regular season wins, held by Michael Jordan's Chicago Bulls, has been surpassed by the Golden State warriors, who has performed spectacularly well, led by its star player Stephen Curry - who is arguably the best shooter in the history of basketball. 
